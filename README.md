@@ -23,6 +23,8 @@ conda activate scarab
 pip install -r requirements.txt
 
 ## Tutorials
-1. `01_mnist_anomaly_detection.ipynb` — Proof of concept on MNIST
-2. `02_microboone_open_data.ipynb` — Prototype on real LArTPC data
-3. `03_sbnd_analysis.ipynb` — Full SBND analysis (in progress)
+1. `mnist_anomaly_detection.ipynb` — Proof of concept on MNIST
+2. `microboone_open_data.ipynb` — Prototype on real LArTPC data
+
+## Anomaly Detection
+1. `SBND_anomaly_detection.ipynb`- WIP anomaly detection
