@@ -12,7 +12,8 @@ events. The framework builds on the FIREFLY methodology
 (Chung et al., arXiv:2509.21817).
 
 ## Repository Structure
-- `notebooks/` — Tutorial notebooks and analysis
+- `notebooks/` — Analysis notebooks
+- `tutorial/` - Tutorial notebooms (MNIST, MicroBoone open dataset)
 - `scarab/` — Core Python package (models, scoring, utilities)
 - `data/` — Local data storage (not tracked by git)
 - `results/` — Output plots and metrics
