@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SCARAB .gitignore files
+
+# Data files (too large for GitHub)
+data/
+*.h5
+*.hdf5
+*.root
+
+# Results (regenerate from code)
+results/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Model weights
+*.pt
+*.pth
+*.h5
+
+# OS files
+.DS_Store
+Thumbs.db
