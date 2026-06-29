@@ -21,13 +21,15 @@ events. The framework builds on the FIREFLY methodology
 ## Setup
 
 conda create -n scarab python=3.11
+
 conda activate scarab
 
-# For CPU-only (most users):
+### For CPU-only (most users):
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
 pip install -r requirements.txt
 
-# For GPU (if you have CUDA):
+### For GPU (if you have CUDA):
 pip install -r requirements.txt
 
 ## Tutorials
