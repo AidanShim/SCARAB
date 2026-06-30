@@ -33,9 +33,9 @@ pip install -r requirements.txt
 ### For GPU (if you have CUDA):
 pip install -r requirements.txt
 
-## Tutorials
-1. `mnist_anomaly_detection.ipynb` — Proof of concept on MNIST
-2. `microboone_open_data.ipynb` — Prototype on real LArTPC data
+## Tutorial folders
+1. `MNIST` — Proof of concept on MNIST data
+2. `MBOONE` — Prototype on real LArTPC data
 
 ## Anomaly Detection
 1. `SBND_anomaly_detection.ipynb`- WIP anomaly detection
