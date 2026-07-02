@@ -1,5 +1,6 @@
 # SCARAB- Standard-Candle Autoencoder for Rare Anomaly Benchmarking
-<img width="1280" height="800" alt="Untitled design" src="https://github.com/user-attachments/assets/3ace3784-85d4-4b0e-9a60-771403f61618" />
+<img width="640" height="400" alt="Untitled design (1)" src="https://github.com/user-attachments/assets/021fd1ca-4432-4381-8346-81e43df2e323" />
+
 
 
 Convolutional autoencoder framework for identifying rare Standard Model 
