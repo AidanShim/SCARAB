@@ -1,5 +1,6 @@
 # SCARAB- Standard-Candle Autoencoder for Rare Anomaly Benchmarking
-<img width="2388" height="1668" alt="Untitled_Artwork-Photoroom" src="https://github.com/user-attachments/assets/b395e981-9dc7-437d-9d53-ff71794ad9a3" />
+<img width="1280" height="800" alt="Untitled design" src="https://github.com/user-attachments/assets/3ace3784-85d4-4b0e-9a60-771403f61618" />
+
 
 Convolutional autoencoder framework for identifying rare Standard Model 
 processes in LArTPC neutrino detector simulation data. Developed as part 
