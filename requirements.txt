@@ -7,4 +7,3 @@ h5py
 jupyter
 pandas
 scikit-image
-file
