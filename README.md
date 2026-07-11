@@ -16,7 +16,7 @@ events. The framework builds on the FIREFLY methodology
 
 ## Repository Structure
 - `notebooks/` — Analysis notebooks
-- `tutorial/` - Tutorial notebooms (MNIST, MicroBoone open dataset)
+- `tutorial/` - Tutorial notebooks (MNIST, MicroBoone open dataset)
 - `scarab/` — Core Python package (models, scoring, utilities)
 - `data/` — Local data storage (not tracked by git)
 - `results/` — Output plots and metrics
@@ -38,7 +38,7 @@ pip install -r requirements.txt
 
 ## Tutorial folders
 1. `MNIST` — Proof of concept on MNIST data
-2. `MBOONE` — Prototype on real LArTPC data
+2. `MBOONE` — Prototype on simulated LArTPC data sourced by the microBoone open samples: https://github.com/uboone/OpenSamples/tree/main 
 
 ## Anomaly Detection
 1. `SBND_anomaly_detection.ipynb`- WIP anomaly detection
