@@ -44,4 +44,4 @@ pip install -r requirements.txt
 1. `SBND_anomaly_detection.ipynb`- WIP anomaly detection
 
 ## Funding
-This work was graciously funded graciously by the Worster family.
+This work was funded graciously by the Worster family.
