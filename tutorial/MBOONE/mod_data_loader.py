@@ -20,10 +20,12 @@ Typical use for training:
     X = data.segments(event_index=0, seg_wire=864, seg_time=64)   # (40, 864, 64, 1)
 """
 
+import os
 import random
 
 import numpy as np
 import h5py
+from numpy.lib.format import open_memmap
 
 
 def apply_cuts(img, cutoff, saturation):
@@ -113,3 +115,69 @@ class WireImages:
         if buf:  # last partial batch
             X = np.stack(buf)
             yield (X, X) if autoencoder else X
+
+    def export_npy(self, out_path, seg_wire, seg_time, event_indices=None):
+        """Write all cut+tiled segments to a dense .npy for training.py (memory-safe).
+
+        Output shape is (n_events * segments_per_event, seg_wire, seg_time, 1), float32,
+        with cuts applied. Uses a memmap so RAM stays low, but the file is DENSE and
+        uncompressed: each cut of all N events is ~N * 8.85 MB (~9.6 GB for all 1085
+        events). Pass event_indices to export only a subset. Returns out_path.
+        """
+        events = list(range(len(self)) if event_indices is None else event_indices)
+        per = self.segments_per_event(seg_wire, seg_time)
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        mm = open_memmap(out_path, mode="w+", dtype=np.float32,
+                         shape=(len(events) * per, seg_wire, seg_time, 1))
+        for k, e in enumerate(events):
+            mm[k * per:(k + 1) * per] = self.segments(e, seg_wire, seg_time)
+        mm.flush()
+        return out_path
+
+
+def export_all_cuts(h5_path, out_dir="inputData",
+                    sizes=((864, 64), (64, 32), (18, 16)), event_indices=None):
+    """Export one dense .npy per cut size from a processed plane-2 image .h5.
+
+    Files are named ``<stem>_<wire>x<time>.npy`` in ``out_dir`` (stem taken from the .h5
+    filename with a trailing '_images' removed), ready to feed training.py --input.
+    Returns the list of written paths.
+    """
+    stem = os.path.splitext(os.path.basename(h5_path))[0]
+    if stem.endswith("_images"):
+        stem = stem[: -len("_images")]
+    written = []
+    with WireImages(h5_path) as data:
+        n = len(data)
+        events = list(range(n) if event_indices is None else event_indices)
+        per_event_mb = data.ds.shape[1] * data.ds.shape[2] * 4 / 1e6
+        total_gb = len(sizes) * len(events) * per_event_mb / 1e3
+        print("exporting %d cut(s) for %d/%d events -> ~%.2f GB total into %s/"
+              % (len(sizes), len(events), n, total_gb, out_dir))
+        for seg_wire, seg_time in sizes:
+            path = os.path.join(out_dir, "%s_%dx%d.npy" % (stem, seg_wire, seg_time))
+            data.export_npy(path, seg_wire, seg_time, event_indices=events)
+            arr = np.load(path, mmap_mode="r")
+            print("  wrote %s  shape=%s  (%.2f GB)"
+                  % (path, arr.shape, os.path.getsize(path) / 1e9))
+            written.append(path)
+    return written
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Export dense .npy segment files (one per cut: 864x64, 64x32, 18x16) "
+                    "from a processed plane-2 image .h5, for training.py."
+    )
+    parser.add_argument("--h5", required=True, help="processed ..._plane2_images.h5 file")
+    parser.add_argument("--out-dir", default="inputData", help="output directory (default: inputData)")
+    parser.add_argument("--events", type=int, default=None,
+                        help="number of events to export (default: ALL -- large; e.g. ~29 GB "
+                             "for 3 cuts x 1085 events). Use e.g. --events 128 for a lean set.")
+    args = parser.parse_args()
+    ev = None if args.events is None else range(args.events)
+    export_all_cuts(args.h5, out_dir=args.out_dir, event_indices=ev)
