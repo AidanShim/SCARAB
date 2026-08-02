@@ -227,7 +227,9 @@ data/
 
 inputData/
 savedModel/
-
+clusterImages/
+nonEmptyImages/
+nonEmptyImages2/
 # Results (regenerate from code)
 results/
 
