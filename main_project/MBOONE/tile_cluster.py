@@ -56,7 +56,16 @@
 #   D6 clusters_padded_<pct>_<W>x<T>.h5 - clusters padded to the <pct>th-pct target +
 #                                    metadata; ONE file per percentile (default 50, 75).
 #                                    [pass 2]  (the "training" files the DataLoader reads)
-#   D1/D6 land in main_project/MBOONE/clusterImages/ ; D2-D5 in main_project/MBOONE/.
+#                                    Oversized clusters are CENTER-CROPPED to the target.
+#   D7 clusters_padded_downscaled_<pct>_<W>x<T>.h5 - ALTERNATE training files [pass 3]:
+#                                    SAME per-percentile targets as D6, but oversized
+#                                    clusters are DOWNSCALED (area-averaged) to fit instead
+#                                    of cropped -- topology kept, resolution sacrificed --
+#                                    AND blip clusters (<= PASS3_MIN_TILES-1 tiles, default
+#                                    <=4) are dropped.  Fewer rows than D6; metadata carries
+#                                    a raw_index back to D1 (for truth-label lookup) plus
+#                                    was_downscaled / downscale_factor.
+#   D1/D6/D7 land in main_project/MBOONE/clusterImages/ ; D2-D5 in main_project/MBOONE/.
 #
 # RUN (from the SCARAB repo root, ubopendata env; numpy needs the env's Library/bin):
 #   conda run --no-capture-output -n ubopendata python main_project/MBOONE/tile_cluster.py
@@ -64,6 +73,10 @@
 #   conda run --no-capture-output -n ubopendata python main_project/MBOONE/tile_cluster.py pass2
 #   # ^ pass 2: writes one padded file per percentile in TILE_CLUSTER_PAD_PCTS
 #   #   (default "50,75" -> clusters_padded_50_<size>.h5 and clusters_padded_75_<size>.h5).
+#   conda run --no-capture-output -n ubopendata python main_project/MBOONE/tile_cluster.py pass3
+#   # ^ pass 3 (ALTERNATE): same targets, but DOWNSCALES oversized clusters instead of
+#   #   cropping and drops <=4-tile blips -> clusters_padded_downscaled_50/75_<size>.h5.
+#   #   Tune the blip cut with TILE_CLUSTER_PASS3_MIN_TILES (default 5 = keep n_tiles>=5).
 # Quick first look at one file / few events, and forced overwrite:
 #   MOD_DATA_FILE_START=0 MOD_DATA_FILE_END=0 TILE_CLUSTER_N_EVENTS=200 \
 #     conda run --no-capture-output -n ubopendata python main_project/MBOONE/tile_cluster.py
@@ -136,6 +149,12 @@ PIXEL_SOURCE = os.environ.get("TILE_CLUSTER_PIXELS", "original").lower()
 # extents, rounded up to even.  (Pass 1 is unaffected by this.)
 PAD_PERCENTILES = [int(x) for x in os.environ.get("TILE_CLUSTER_PAD_PCTS", "50,75").split(",") if x.strip()]
 
+# Pass-3 (downscale) knob.  Pass 3 writes an ALTERNATE set of training files that
+# (a) DOWNSCALE oversized clusters to the target instead of cropping them, and
+# (b) drop small "blip" clusters with <= PASS3_MIN_TILES-1 tiles (default: <=4, i.e.
+# keep only clusters with >= 5 tiles).  Pass 1/2 are unaffected.
+PASS3_MIN_TILES = int(os.environ.get("TILE_CLUSTER_PASS3_MIN_TILES", "5"))    # keep n_tiles >= this
+
 STORE_DTYPE = np.float32
 GZIP_LEVEL = 4
 N_SAMPLES = 40                  # clusters drawn for the D3 visual-check grid
@@ -171,6 +190,10 @@ def image_name(filenum):
 
 def padded_name(pct):
     return "clusters_padded_%d_%s.h5" % (pct, SIZE_TAG)
+
+
+def padded_downscaled_name(pct):
+    return "clusters_padded_downscaled_%d_%s.h5" % (pct, SIZE_TAG)
 
 
 def apply_cuts(img, cutoff, saturation):
@@ -273,6 +296,68 @@ def _even_ceil(x):
     """Smallest even integer >= x (autoencoders need even spatial dims to pool/upsample)."""
     v = int(np.ceil(x))
     return v + 1 if v % 2 else v
+
+
+# ---------------------- Stage 4 (pass 3): downscale instead of crop -----------
+def _interp0(A, pos):
+    """Linear-interpolate the ROWS of A (shape (n, ...)) at fractional positions pos (k,).
+
+    Returns shape (k, ...).  Used to sample the summed-area table at fractional edges.
+    """
+    n = A.shape[0]
+    i0 = np.clip(np.floor(pos).astype(np.int64), 0, n - 2)
+    frac = (pos - i0).reshape((-1,) + (1,) * (A.ndim - 1))
+    return A[i0] * (1.0 - frac) + A[i0 + 1] * frac
+
+
+def area_resize(image, out_wire, out_time):
+    """EXACT area-average resample of a (wire, time) image to (out_wire, out_time).
+
+    Method: build the summed-area table (2-D cumulative sum) of the image.  Because
+    the pixels are piecewise-constant, that integral is piecewise-BILINEAR, so
+    linearly interpolating the table at the (fractional) output-cell edges gives the
+    EXACT mean charge inside each output cell -- i.e. real area averaging / box
+    downsampling, not point sampling.  Consequences:
+      * Every input pixel contributes to some output cell, so a thin 1-px track can
+        never fall "between samples" and disappear -- the track's PATH (its topology)
+        is preserved; only resolution and fine detail are sacrificed, exactly the
+        trade the request asks for.
+      * It is mean-preserving (a flat patch keeps its value); the per-pixel charge
+        SCALE is kept while the total sum scales with area -- and the scaled anomaly
+        score (MSE / total charge) divides that out.
+    Aspect ratio is the caller's responsibility (see downscale_to_target); this just
+    maps h->out_wire, w->out_time.
+    """
+    h, w = image.shape
+    sat = np.cumsum(np.cumsum(image.astype(np.float64), axis=0), axis=1)
+    sat = np.pad(sat, ((1, 0), (1, 0)))              # (h+1, w+1): row/col 0 are zeros
+    ys = np.linspace(0.0, h, out_wire + 1)           # output-cell edges in input coords
+    xs = np.linspace(0.0, w, out_time + 1)
+    a = _interp0(sat, ys)                            # sample SAT along wire  -> (out_wire+1, w+1)
+    a = _interp0(a.T, xs).T                          # sample SAT along time  -> (out_wire+1, out_time+1)
+    box = a[1:, 1:] - a[:-1, 1:] - a[1:, :-1] + a[:-1, :-1]   # per-cell integral (incl-excl)
+    area = np.outer(np.diff(ys), np.diff(xs))        # per-cell area in input px
+    return (box / area).astype(STORE_DTYPE)
+
+
+def downscale_to_target(image, target_wire, target_time):
+    """Fit ``image`` into (target_wire, target_time) by UNIFORM downscale + center-pad.
+
+    If the crop already fits, it is just center zero-padded (identical to pass 2's
+    treatment of small clusters).  If it is larger in either axis, it is shrunk by a
+    single scale = min(target_wire/h, target_time/w) < 1 (uniform -> aspect ratio and
+    therefore track angles/topology preserved, no distortion), area-averaged to the
+    new size, then center-padded to the target.  Returns (padded_image, scale) where
+    scale == 1.0 means "fit without downscaling".
+    """
+    h, w = image.shape
+    scale = min(target_wire / h, target_time / w, 1.0)
+    if scale >= 1.0:
+        return pad_to_target(image, target_wire, target_time), 1.0
+    nh = max(1, min(target_wire, int(round(h * scale))))
+    nw = max(1, min(target_time, int(round(w * scale))))
+    small = area_resize(image, nh, nw)
+    return pad_to_target(small, target_wire, target_time), float(scale)
 
 
 # ------------------------- per-event full image -------------------------------
@@ -775,6 +860,107 @@ def run_pass_2():
         print("=" * 64)
 
 
+# --------------------------------- PASS 3 -------------------------------------
+def run_pass_3():
+    """Alternate training files: DOWNSCALE oversized clusters (instead of cropping) and
+    drop <=(PASS3_MIN_TILES-1)-tile blips.  Writes clusters_padded_downscaled_<pct>_<size>.h5,
+    one per percentile.  Targets are the SAME as pass 2 (that percentile of the full raw
+    extent distribution), so downscaled_75 (288x176) is a controlled crop-vs-downscale
+    A/B against clusters_padded_75.  Pass 1/2 untouched."""
+    raw_path = OUT_DIR / RAW_NAME
+    if not raw_path.exists():
+        raise SystemExit("D1 not found: %s (run pass 1 first)" % raw_path)
+
+    with ClusterImages(raw_path) as raw:
+        n = len(raw)
+        widths, heights = raw.width, raw.height            # per-cluster wire/time extents (px)
+        n_tiles = raw.h5["n_tiles"][:]
+
+        # (b) drop small blips: keep only clusters with >= PASS3_MIN_TILES tiles.
+        keep_idx = np.nonzero(n_tiles >= PASS3_MIN_TILES)[0]
+        n_keep = int(keep_idx.size)
+        n_drop = n - n_keep
+        print("PASS 3: dropping %d / %d clusters with <= %d tiles (blips); keeping %d"
+              % (n_drop, n, PASS3_MIN_TILES - 1, n_keep))
+        if n_keep == 0:
+            raise SystemExit("PASS 3: nothing left after the <=%d-tile cut" % (PASS3_MIN_TILES - 1))
+
+        # Targets identical to pass 2 (percentiles of the FULL raw distribution), so the
+        # only per-cluster difference vs clusters_padded_<pct> is downscale-instead-of-crop.
+        plans = {}
+        for pct in PAD_PERCENTILES:
+            pp = OUT_DIR / padded_downscaled_name(pct)
+            if pp.exists() and not FORCE:
+                raise SystemExit("downscaled file exists: %s (TILE_CLUSTER_FORCE=1 to overwrite)" % pp)
+            tw = _even_ceil(np.percentile(widths, pct))
+            tt = _even_ceil(np.percentile(heights, pct))
+            plans[pct] = dict(path=pp, tw=tw, tt=tt)
+            print("PASS 3: %d kept clusters -> %s  at %d wire x %d time px  (%dth pct, DOWNSCALE)"
+                  % (n_keep, pp.name, tw, tt, pct))
+
+        for pct, p in plans.items():
+            out = h5py.File(str(p["path"]), "w")
+            p["out"] = out
+            p["imgs"] = out.create_dataset("images", shape=(n_keep, p["tw"], p["tt"]),
+                                           dtype=STORE_DTYPE, chunks=(1, p["tw"], p["tt"]),
+                                           compression="gzip", compression_opts=GZIP_LEVEL, shuffle=True)
+            for k, v in raw.attrs.items():
+                out.attrs[k] = v
+            out.attrs["target_wire"] = p["tw"]
+            out.attrs["target_time"] = p["tt"]
+            out.attrs["target_percentile"] = pct
+            out.attrs["oversize_policy"] = "downscale"            # vs pass 2's "crop"
+            out.attrs["pass3_min_tiles"] = PASS3_MIN_TILES
+            out.attrs["n_clusters"] = n_keep
+            out.attrs["n_dropped_blips"] = n_drop
+            # metadata for the KEPT clusters only, plus raw_index so truth labels (indexed
+            # by raw-cluster order) can be mapped:  is_nu_downscaled = is_nu[raw_index].
+            mg = out.create_group("metadata")
+            p["mg"] = mg
+            for name, _ in _META_1D:
+                mg.create_dataset(name, data=raw.h5[name][:][keep_idx],
+                                  compression="gzip", compression_opts=GZIP_LEVEL)
+            for name in ("bbox_tile_coords", "bbox_pixel_coords"):
+                mg.create_dataset(name, data=raw.h5[name][:][keep_idx],
+                                  compression="gzip", compression_opts=GZIP_LEVEL)
+            mg.create_dataset("raw_index", data=keep_idx.astype(np.uint32),
+                              compression="gzip", compression_opts=GZIP_LEVEL)
+            p["was_downscaled"] = np.zeros(n_keep, dtype=bool)
+            p["downscale_factor"] = np.ones(n_keep, dtype=np.float32)
+            p["zero_frac_sum"] = 0.0
+
+        for out_row, i in enumerate(keep_idx):
+            img = raw.image(int(i))
+            for p in plans.values():
+                proc, factor = downscale_to_target(img, p["tw"], p["tt"])
+                p["imgs"][out_row] = proc
+                p["downscale_factor"][out_row] = factor
+                p["was_downscaled"][out_row] = factor < 1.0
+                p["zero_frac_sum"] += float(np.mean(proc == 0))
+            if (out_row + 1) % 5000 == 0 or (out_row + 1) == n_keep:
+                print("    processed %d / %d" % (out_row + 1, n_keep), flush=True)
+
+        print("\n" + "=" * 64)
+        print("PASS 3 COMPLETE  (%d percentile file(s); oversize policy = DOWNSCALE)" % len(plans))
+        for pct, p in plans.items():
+            p["mg"].create_dataset("was_downscaled", data=p["was_downscaled"],
+                                   compression="gzip", compression_opts=GZIP_LEVEL)
+            p["mg"].create_dataset("downscale_factor", data=p["downscale_factor"],
+                                   compression="gzip", compression_opts=GZIP_LEVEL)
+            n_ds = int(p["was_downscaled"].sum())
+            fac = p["downscale_factor"][p["was_downscaled"]]
+            print("%dth pct -> %s   (%d wire x %d time px)" % (pct, p["path"].name, p["tw"], p["tt"]))
+            print("   downscaled (exceeded target): %d (%.1f%%)  [pass 2 would CROP these instead]"
+                  % (n_ds, 100.0 * n_ds / n_keep if n_keep else 0.0))
+            print("   downscale factor on those   : median=%s  min=%s  (1.0 = untouched)"
+                  % (("%.3f" % np.median(fac)) if fac.size else "-",
+                     ("%.3f" % fac.min()) if fac.size else "-"))
+            print("   mean zero (padding) fraction: %.1f%%" % (100.0 * p["zero_frac_sum"] / n_keep if n_keep else 0.0))
+            p["out"].close()
+        print("dropped %d blip clusters (<= %d tiles)" % (n_drop, PASS3_MIN_TILES - 1))
+        print("=" * 64)
+
+
 # --------------------------------- self-test ----------------------------------
 def _self_test():
     """Logic checks on a synthetic binary map -- no data files needed."""
@@ -800,6 +986,23 @@ def _self_test():
     p = pad_to_target(np.ones((exp_w, exp_h), np.float32), _even_ceil(exp_w) + 4, _even_ceil(exp_h) + 4)
     assert p.shape == (_even_ceil(exp_w) + 4, _even_ceil(exp_h) + 4) and p.sum() == exp_w * exp_h
     print("[ok] clustering, cosmic caps, extraction geometry, and padding all pass")
+
+    # pass-3 area downscale: exactness (flat patch), topology (diagonal survives), fit + pad
+    flat = np.full((100, 60), 7.0, np.float32)
+    r = area_resize(flat, 20, 12)
+    assert r.shape == (20, 12) and np.allclose(r, 7.0), "area_resize must be mean-preserving on flat input"
+    diag = np.zeros((64, 64), np.float32); np.fill_diagonal(diag, 100.0)
+    rd = area_resize(diag, 16, 16)
+    assert (np.diag(rd) > 0).all(), "diagonal track must survive downscale (topology preserved)"
+    assert rd.max() <= 100.0 + 1e-3, "area average cannot exceed input max"
+    big = np.ones((400, 300), np.float32)                 # bigger than target in both axes
+    out, sc = downscale_to_target(big, 288, 176)
+    assert out.shape == (288, 176) and 0.0 < sc < 1.0, "oversized -> uniform downscale + pad"
+    assert abs(sc - min(288 / 400, 176 / 300)) < 1e-6, "scale must be the min aspect-preserving ratio"
+    small = np.ones((50, 40), np.float32)                 # already fits -> just pad, scale 1.0
+    out2, sc2 = downscale_to_target(small, 288, 176)
+    assert out2.shape == (288, 176) and sc2 == 1.0 and out2.sum() == 50 * 40, "fitting crop is only padded"
+    print("[ok] pass-3 area downscale: exact on flats, topology-preserving, correct fit/scale")
     print("SELF-TEST PASSED")
 
 
@@ -808,6 +1011,8 @@ def main():
         _self_test(); return
     if len(sys.argv) > 1 and sys.argv[1] == "pass2":
         run_pass_2()
+    elif len(sys.argv) > 1 and sys.argv[1] == "pass3":
+        run_pass_3()
     else:
         print("Tile map dir : %s" % TILE_DIR)
         print("Pixel source : %s%s" % (PIXEL_SOURCE, "  (%s)" % IMG_DIR if PIXEL_SOURCE == "original" else ""))

@@ -1,9 +1,62 @@
-torch
-torchvision
-numpy
-matplotlib
-scikit-learn
-h5py
-jupyter
-pandas
-scikit-image
+# SCARAB dependencies.
+#
+# One environment runs the ENTIRE main_project pipeline (preprocessing +
+# clustering + training) -- the split across the legacy `ubopendata` (py3.7 /
+# TF 1.14) and `scarab` envs is no longer needed. `ubopendata` is only still
+# required for tutorial/MBOONE/microboone_open_data.ipynb, which imports pynuml
+# (see the OPTIONAL section at the bottom); main_project/MBOONE/plane_2.py
+# deliberately reads wire_table with plain h5py instead, so nothing in the main
+# pipeline needs pynuml.
+#
+#   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   # or: conda create -n scarab python=3.11 && pip install -r requirements.txt
+#
+# Python 3.11 recommended (3.9+ works). Verified working set, 2026-08-05:
+#   python 3.11.15  tensorflow 2.21.0  keras 3.15.0  numpy 2.0.1  h5py 3.14.0
+#   scipy 1.16.0  scikit-image 0.26.0  scikit-learn 1.9.0  matplotlib 3.11.0
+#   pandas 3.0.3  torch 2.5.1  torchvision 0.20.1
+# To freeze this exactly for a cluster run:  pip freeze > requirements-lock.txt
+
+
+# ----------------------------------------------------------------------------
+# Core -- required by the main_project pipeline. Nothing here is optional.
+# ----------------------------------------------------------------------------
+numpy>=1.24
+h5py>=3.8                 # every stage reads/writes gzip-chunked HDF5
+scipy>=1.10               # tile_cluster.py: ndimage.label (king-move clustering)
+scikit-image>=0.20        # plane_2.py: measure.block_reduce (time downsampling)
+matplotlib>=3.6           # tile_cluster.py deliverables D2-D4, plot_utils.py
+
+# Training + evaluation (MBOONE_Training.py, Clustering_Training.py,
+# tutorial/MBOONE/training.py). 2.16+ ships Keras 3, whose PyDataset backs the
+# streaming keras.utils.Sequence loaders; 2.10 (Keras 2) also works.
+# On a GPU node install `tensorflow[and-cuda]` instead of plain `tensorflow`.
+tensorflow>=2.16,<3
+
+# ----------------------------------------------------------------------------
+# Analysis -- notebooks and the tutorial trainer.
+# ----------------------------------------------------------------------------
+scikit-learn>=1.2         # tutorial/MBOONE/training.py: train_test_split
+pandas>=2.0               # loss-history / notebook analysis
+jupyter>=1.0              # Clustering_Analysis.ipynb, microboone_open_data_non_empty.ipynb
+ipykernel>=6.0
+
+# ----------------------------------------------------------------------------
+# PyTorch -- currently used only by tutorial/MNIST/mnist_anomaly_detection.ipynb.
+# Kept installed as the migration path off TensorFlow/Keras; no main_project
+# code imports it. CPU wheels by default -- for a CUDA build on the cluster see
+# https://pytorch.org/get-started/locally/ for the right --index-url.
+# ----------------------------------------------------------------------------
+torch>=2.0
+torchvision>=0.15
+
+# ----------------------------------------------------------------------------
+# OPTIONAL -- not needed to run any main_project stage. Install on demand.
+# ----------------------------------------------------------------------------
+seaborn>=0.12             # tutorial/MNIST/mnist_anomaly_detection.ipynb
+reportlab>=4.0            # docs/generate_diagrams.ipynb
+# plotly>=5.9             # tutorial/MBOONE/microboone_open_data.ipynb only
+# pynuml>=0.1             # tutorial/MBOONE/microboone_open_data.ipynb only.
+#                         # Reads the raw open-data files; pulls a heavy
+#                         # dependency tree and is pinned to the old py3.7
+#                         # `ubopendata` env. main_project does NOT need it.

@@ -230,6 +230,10 @@ savedModel/
 clusterImages/
 nonEmptyImages/
 nonEmptyImages2/
+MBOONE_TruthLabels/
+# Truth-label tables: ~100 MB each (GitHub's hard limit), regenerated in ~5 min by
+# main_project/MBOONE/cluster_truth_labels.py.  The README beside them stays tracked.
+**/MBOONE_TruthLabels/*.csv
 # Results (regenerate from code)
 results/
 

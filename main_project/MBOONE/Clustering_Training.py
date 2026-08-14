@@ -1,62 +1,8 @@
-"""Unsupervised convolutional autoencoder trained on EXTRACTED-INTERACTION cluster
-images (the padded output of tile_cluster.py), not on raw detector tiles.
-
-Same autoencoder and reconstruction-loss training procedure as MBOONE_Training.py /
-tutorial/MBOONE/training.py -- the ARCHITECTURE IS UNCHANGED (identical layer graph,
-"unsup_" layer names, paper Table 1 param counts at 18x16). The only differences are
-where the data comes from and how it is chosen:
-
-  * Data = ONE combined padded file per percentile, written by
-    `tile_cluster.py pass2`:
-        clusterImages/clusters_padded_50_18x16.h5   (target 144 x 112 px, 50th pct)
-        clusterImages/clusters_padded_75_18x16.h5   (target 288 x 176 px, 75th pct)
-    Each holds a single dataset `images` of shape (n_clusters, wire, time), gzip-chunked
-    one image per chunk, so a keras.utils.Sequence streams batches straight from HDF5 and
-    RAM stays flat.  The input shape is read FROM THE FILE (so 50th vs 75th "just works",
-    and a future 64x32 run needs no code change).
-
-  * Subset + split.  There are ~355k clusters total, but to keep an epoch to ~10-20 min
-    on CPU we train on a configurable subset (TOTAL_IMAGES, default 60,000) drawn at
-    random (fixed seed), then cut the usual 50/10/40 train/val/test split -> 30k train,
-    6k val, 24k test at the default.
-
-  * No normalization (raw thresholded-ADC scale, like the references) -- the anomaly
-    score = reconstruction MSE lives on that scale.
-
-Outputs land in savedModel/cluster_<pct>_18x16/ :
-    unsupervised_cluster_<pct>_18x16.h5           (best model, min val_loss)
-    unsupervised_cluster_<pct>_18x16_history.csv  (epoch,loss,val_loss)
-CPU-only (GPUs hidden before TF import).
-
-FOOTPRINT (so training doesn't hog the machine): worker threads are capped (CPU_THREADS,
-default "auto" = half the logical cores; also --threads / CLUSTERING_THREADS) and the
-process runs at below-normal OS priority (LOW_PRIORITY; --priority normal to disable), so
-foreground work always preempts it. RAM stays flat in the data -- the loader streams one
-batch from HDF5 at a time, never the whole set -- so peak memory is just the model plus one
-batch of activations: the 50th (19.5M params) is light, the 75th (61.2M) needs ~2-3 GB, and
---batch-size is the lever to trim activation memory further (try 32-64 for the 75th).
-
-EVERYTHING you'd usually want to change is a CONFIG constant just below the imports
-(percentile, how many images, epochs, batch size, seed, CPU threads, priority) and every
-one is also a CLI flag, so `--epochs 20` or editing EPOCHS = 20 both work.
-
-Usage:
-  python Clustering_Training.py                       # PERCENTILE, TOTAL_IMAGES, EPOCHS defaults
-  python Clustering_Training.py --percentile 50       # train the 50th-pct (144x112) set
-  python Clustering_Training.py --percentile 50,75     # both, one after the other
-  python Clustering_Training.py --total 20000 --epochs 2   # fast smoke test
-  python Clustering_Training.py --percentile 75 --threads 2 --batch-size 32  # gentle footprint
-  python Clustering_Training.py --self-test            # architecture checks, no data
-"""
-
 import os
 import sys
 
-# ================== CPU / MEMORY FOOTPRINT (edit these) ==================
-# Keep training from hogging the machine so other work stays responsive. These MUST be
-# applied before numpy/TensorFlow import (OpenMP/MKL read the thread env only at import
-# time), so they live here, above the imports, not in the CONFIG block below.
-CPU_THREADS = "auto"     # worker threads: "auto" = half the logical cores, or an int.
+
+CPU_THREADS = "6"     # Change accordingly for whatever CPU you have
                          #   per-run override:  --threads N   or   CLUSTERING_THREADS=N
 LOW_PRIORITY = True      # run at below-normal OS priority so foreground work preempts it
                          #   (turn off with  --priority normal)
@@ -126,15 +72,38 @@ def _set_low_priority() -> bool:
 # Every constant here is also a CLI flag with the same default, so you can either edit
 # the number below or pass e.g. --epochs 20 / --percentile 50 -- whichever is easier.
 PERCENTILE = 75          # which padded set to train on: 50 (144x112) or 75 (288x176)
-TOTAL_IMAGES = 60000     # clusters used for the WHOLE train/val/test split
+DATASET = "binary"         # which cluster set: "crop" (pass-2 clusters_padded_*, oversized
+                         # cropped), "downscale" (pass-3 clusters_padded_downscaled_*,
+                         # oversized DOWNSCALED + <=4-tile blips dropped), or "binary"
+                         # (clusters_padded_binary_*, charge -> 0/100; binary_cluster.py,
+                         # 75th only). Anything else aborts (also --dataset crop|downscale|binary).
+TOTAL_IMAGES = 100000     # clusters used for the WHOLE train/val/test split
                          # (train = 50% of this -> 30,000 at the default)
-EPOCHS = 16              # training epochs (bump to 20 with no other change)
+EPOCHS = 24              # training epochs (bump to 20 with no other change)
 BATCH_SIZE = 128         # mini-batch size
 SEED = 42                # subset + split + shuffle seed (reproducible)
 TILE_TAG = "18x16"       # clustering tile size the padded file was made with
 # ================================================================================
 
-TRAIN_RATIO, VAL_RATIO, TEST_RATIO = 0.5, 0.1, 0.4   # 60k -> 30k / 6k / 24k
+# Which padded HDF5 each dataset reads, and the tag its models are saved under (so a
+# "crop" run and a "downscale" run never overwrite each other).  "crop" keeps the
+# original unprefixed names for backward compatibility with the models already trained.
+DATASET_FILES = {"crop": "clusters_padded_%d_%s.h5",
+                 "downscale": "clusters_padded_downscaled_%d_%s.h5",
+                 "binary": "clusters_padded_binary_%d_%s.h5"}
+DATASET_TAG = {"crop": "", "downscale": "downscaled_", "binary": "binary_"}
+DATASET_MAKE = {"crop": "python tile_cluster.py pass2",
+                "downscale": "python tile_cluster.py pass3",
+                "binary": "python binary_cluster.py"}
+
+
+def _check_dataset(ds):
+    if ds not in DATASET_FILES:
+        raise SystemExit("--dataset must be one of %s, got %r"
+                         % (sorted(DATASET_FILES), ds))
+    return ds
+
+TRAIN_RATIO, VAL_RATIO, TEST_RATIO = 0.5, 0.1, 0.4  
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = SCRIPT_DIR / "clusterImages"          # holds clusters_padded_*.h5
@@ -263,11 +232,16 @@ class ClusterSequence(keras.utils.Sequence):
             self.rng.shuffle(self.order)
 
 
-def open_padded(data_dir: Path, pct: int, tile_tag: str):
-    """Open the combined padded file for one percentile; return (handle, images, N, sw, st)."""
-    p = data_dir / ("clusters_padded_%d_%s.h5" % (pct, tile_tag))
+def open_padded(data_dir: Path, pct: int, tile_tag: str, dataset: str = "crop"):
+    """Open the combined padded file for one percentile; return (handle, images, N, sw, st).
+
+    ``dataset`` picks which file: "crop" -> clusters_padded_<pct>_<tag>.h5 (pass 2),
+    "downscale" -> clusters_padded_downscaled_<pct>_<tag>.h5 (pass 3).
+    """
+    _check_dataset(dataset)
+    p = data_dir / (DATASET_FILES[dataset] % (pct, tile_tag))
     if not p.exists():
-        raise SystemExit("missing padded file: %s\n(run:  python tile_cluster.py pass2)" % p)
+        raise SystemExit("missing padded file: %s\n(run:  %s)" % (p, DATASET_MAKE[dataset]))
     h = h5py.File(str(p), "r")
     imgs = h["images"]
     n, sw, st = imgs.shape
@@ -334,20 +308,21 @@ def eval_anomaly_sample(model, seq: ClusterSequence, max_images: int = 50000) ->
 
 def train_one_percentile(pct: int, args: argparse.Namespace) -> None:
     print("\n" + "=" * 72)
-    h, imgs, n_total, sw, st = open_padded(args.data_dir, pct, args.tile_tag)
+    h, imgs, n_total, sw, st = open_padded(args.data_dir, pct, args.tile_tag, args.dataset)
     seg_shape = (sw, st, 1)
     tr, va, te = select_and_split(n_total, args.total, args.seed)
-    print("PERCENTILE %d  |  images %dx%d  |  available=%d  |  using=%d  (train=%d val=%d test=%d)"
-          % (pct, sw, st, n_total, len(tr) + len(va) + len(te), len(tr), len(va), len(te)))
+    print("PERCENTILE %d  |  dataset=%s  |  images %dx%d  |  available=%d  |  using=%d  (train=%d val=%d test=%d)"
+          % (pct, args.dataset, sw, st, n_total, len(tr) + len(va) + len(te), len(tr), len(va), len(te)))
 
     model = build_unsupervised(seg_shape)
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001), loss="mse")
     print("parameters: %d  |  epochs: %d  |  batch: %d" % (model.count_params(), args.epochs, args.batch_size))
 
-    out_dir = args.output_dir / ("cluster_%d_%s" % (pct, args.tile_tag))   # savedModel/cluster_75_18x16/
+    vtag = DATASET_TAG[args.dataset]                                       # "" (crop) or "downscaled_"
+    out_dir = args.output_dir / ("cluster_%s%d_%s" % (vtag, pct, args.tile_tag))  # savedModel/cluster_[downscaled_]75_18x16/
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / ("unsupervised_cluster_%d_%s.h5" % (pct, args.tile_tag))
-    csv_path = out_dir / ("unsupervised_cluster_%d_%s_history.csv" % (pct, args.tile_tag))
+    out_path = out_dir / ("unsupervised_cluster_%s%d_%s.h5" % (vtag, pct, args.tile_tag))
+    csv_path = out_dir / ("unsupervised_cluster_%s%d_%s_history.csv" % (vtag, pct, args.tile_tag))
     if csv_path.exists():
         csv_path.unlink()
 
@@ -379,6 +354,10 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         description="Train the unsupervised autoencoder on padded cluster images (CPU, streamed from HDF5).")
     p.add_argument("--percentile", type=str, default=str(PERCENTILE),
                    help="which padded set(s) to train: 50, 75, or '50,75' for both (default %d)" % PERCENTILE)
+    p.add_argument("--dataset", type=str, default=DATASET, choices=sorted(DATASET_FILES),
+                   help="'crop' (pass-2 clusters_padded_*), 'downscale' (pass-3 "
+                        "clusters_padded_downscaled_*), or 'binary' (clusters_padded_binary_*, "
+                        "0/100) (default %s)" % DATASET)
     p.add_argument("--total", type=int, default=TOTAL_IMAGES,
                    help="total clusters for the train/val/test split; train = 50%% of this (default %d)" % TOTAL_IMAGES)
     p.add_argument("--epochs", type=int, default=EPOCHS, help="epochs (default %d)" % EPOCHS)
@@ -410,6 +389,9 @@ def main(argv: Optional[list] = None) -> None:
     if args.self_test:
         run_self_test()
         return
+    _check_dataset(args.dataset)                # crop | downscale, else abort clearly
+    print("DATASET: %s  -> %s" % (args.dataset,
+          DATASET_FILES[args.dataset].replace("%d", "<pct>") % args.tile_tag))
     if args.priority == "low":
         print("OS priority: below-normal (%s)" % ("set" if _set_low_priority() else "could not set"))
     print("CPU threads: %d of %d logical cores  (edit CPU_THREADS / --threads / CLUSTERING_THREADS)"
